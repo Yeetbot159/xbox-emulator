@@ -353,6 +353,49 @@ fn vertex_misc_vector_export_feeds_the_render_target_array_index() {
     assert!(line.contains("uint4(") && line.trim_end().ends_with(".z);"), "{line}");
 }
 
+#[test]
+fn rdna2_viewport_index_comes_from_layer_bits_19_16() {
+    let words = [0xf800_00cf, 0x0403_0200, 0xf800_08df, 0x0200_0101, S_ENDPGM];
+    let inputs = vec![sig("SV_VertexID", 6, 1, 0, 1)];
+    let ex = shader(
+        Stage::Vertex,
+        &words,
+        inputs.clone(),
+        vec![sig("SV_Position", 1, 3, 0, 0xf), sig("SV_RenderTargetArrayIndex", 4, 1, 1, 1), sig("SV_ViewportArrayIndex", 5, 1, 2, 1)],
+        None,
+    );
+    let t = translate(&ex).expect("viewport export translates");
+    let layer = t.hlsl.lines().find(|l| l.contains("o.o1 =")).unwrap_or_else(|| panic!("no layer write:\n{}", t.hlsl));
+    let view = t.hlsl.lines().find(|l| l.contains("o.o2 =")).unwrap_or_else(|| panic!("no viewport write:\n{}", t.hlsl));
+    assert!(layer.contains("(v0) & 0x7ffu"), "{layer}");
+    assert!(view.contains("((v0) >> 16) & 0xfu"), "{view}");
+    assert!(!view.contains(".w"), "{view}");
+    let view_only = shader(
+        Stage::Vertex,
+        &words,
+        inputs.clone(),
+        vec![sig("SV_Position", 1, 3, 0, 0xf), sig("SV_ViewportArrayIndex", 5, 1, 1, 1)],
+        None,
+    );
+    let only = translate(&view_only).expect("viewport without a layer translates");
+    let line = only.hlsl.lines().find(|l| l.contains("o.o1 =")).unwrap_or_else(|| panic!("no viewport write:\n{}", only.hlsl));
+    assert!(line.contains("((v0) >> 16) & 0xfu"), "{line}");
+    let mut no_z = words;
+    no_z[2] = 0xf800_08db;
+    let e = translate(&shader(
+        Stage::Vertex,
+        &no_z,
+        inputs,
+        vec![sig("SV_Position", 1, 3, 0, 0xf), sig("SV_ViewportArrayIndex", 5, 1, 1, 1)],
+        None,
+    ))
+    .err()
+    .expect("missing z lane translated");
+    assert!(e.contains('z') && e.contains("SV_ViewportArrayIndex"), "{e}");
+    #[cfg(windows)]
+    tombox_xshader::dxc::compile(&t.hlsl, &tombox_xshader::dxc::profile_for(t.profile)).unwrap();
+}
+
 const EXP_POS0_V0_V3: [u32; 2] = [0xf800_08cf, 0x0300_0300];
 
 #[test]

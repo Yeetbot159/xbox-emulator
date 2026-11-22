@@ -6145,14 +6145,27 @@ impl<'a> Emitter<'a> {
                 })
                 .collect();
             if target == 13 && !misc.is_empty() {
+                let packed_view = self.durango.is_none() && osig.iter().any(|e| e.sysval == 5);
+                if packed_view && compr {
+                    return Err("position export 13 packs SV_ViewportArrayIndex into the layer dword, and a compressed export has no integer dword".into());
+                }
                 for (ei, c) in misc {
-                    if self.durango.is_none() && osig.iter().any(|e| e.sysval == 5) {
-                        return Err("position export 13 (misc vector) writes SV_ViewportArrayIndex, which RDNA2 packs into layer bits 19:16; not lowered".into());
+                    if packed_view && !matches!(osig[ei].comp_type, 1 | 2) {
+                        return Err(format!("position export 13 packs {} as an integer field of the layer dword", osig[ei].name));
                     }
-                    if (en >> if c == "z" { 2 } else { 3 }) & 1 == 0 {
-                        return Err(format!("position export 13 (misc vector) leaves the {c} lane of {} disabled", osig[ei].name));
+                    let lane = if packed_view { 2 } else if c == "z" { 2 } else { 3 };
+                    if (en >> lane) & 1 == 0 {
+                        let which = if lane == 2 { "z" } else { "w" };
+                        return Err(format!("position export 13 (misc vector) leaves the {which} lane of {} disabled", osig[ei].name));
                     }
-                    assigns.push((ei, c.to_string()));
+                    let sw = if !packed_view {
+                        c.to_string()
+                    } else if osig[ei].sysval == 5 {
+                        "view".into()
+                    } else {
+                        "layer".into()
+                    };
+                    assigns.push((ei, sw));
                 }
             } else if target != 12 {
                 let mut regs: Vec<u32> = osig.iter().filter(|e| matches!(e.sysval, 2 | 3)).map(|e| e.register).collect();
@@ -6194,6 +6207,15 @@ impl<'a> Emitter<'a> {
         let mut lines = vec![];
         for (ei, sw) in assigns {
             let (ty, _) = sig_type(&osig[ei]);
+            if matches!(sw.as_str(), "layer" | "view") {
+                let z = match &raw {
+                    Some(rc) => rc[2].clone(),
+                    None => return Err("position export 13 packs SV_ViewportArrayIndex into the layer dword, which this export does not carry unpacked".into()),
+                };
+                let expr = if sw == "layer" { format!("({z}) & 0x7ffu") } else { format!("(({z}) >> 16) & 0xfu") };
+                lines.push(format!("if (exec_lo & 1u) o.o{ei} = ({ty})({expr});"));
+                continue;
+            }
             // Integer elements carry the register bits themselves; converting them through
             // float (or half) would destroy them.
             let val = match (osig[ei].comp_type, &raw) {
