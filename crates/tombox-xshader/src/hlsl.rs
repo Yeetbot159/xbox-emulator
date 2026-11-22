@@ -2363,7 +2363,9 @@ impl<'a> Emitter<'a> {
     }
 
     fn lds_order(&mut self, writes: bool, reads: bool) {
-        let hazard = (reads && self.lds_w_pending) || (writes && self.lds_r_pending);
+        let crossed = (reads && self.lds_w_pending) || (writes && self.lds_r_pending);
+        let wave_write = self.one_wave_lds() && writes && self.lds_w_pending;
+        let hazard = crossed || wave_write;
         if hazard && self.brace_depth == 0 && self.loop_depth == 0 {
             self.line("GroupMemoryBarrierWithGroupSync();");
             self.lds_w_pending = false;

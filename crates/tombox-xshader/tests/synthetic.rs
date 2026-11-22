@@ -502,3 +502,46 @@ fn compute_numthreads_come_from_psv_when_the_preamble_is_zero() {
     let missing = compute_threads(None, [0; 4]);
     assert!(missing.contains("[numthreads(1, 1, 1)]"), "{missing}");
 }
+
+fn compute_with(words: &[u32], preamble: [u32; 4]) -> String {
+    let mut ex = shader(Stage::Compute, words, vec![], vec![], None);
+    ex.isa_preamble = preamble;
+    translate(&ex).expect("compute shader translates").hlsl
+}
+
+fn consecutive_lds() -> [u32; 7] {
+    [0xd834_0000, 0x0000_0909, 0xd834_0000, 0x0000_0a09, 0xd8d8_0000, 0x0700_0007, S_ENDPGM]
+}
+
+fn consecutive_reads() -> [u32; 5] {
+    [0xd8d8_0000, 0x0700_0007, 0xd8d8_0000, 0x0800_0008, S_ENDPGM]
+}
+
+fn barriers_between_first_lds(h: &str) -> usize {
+    let body = h.split("void main").nth(1).expect("compute entry");
+    let first = body.find("tb_lds[").expect("first LDS access");
+    let second = body[first + 1..].find("tb_lds[").map(|p| first + 1 + p).expect("second LDS access");
+    body[first..second].matches("GroupMemoryBarrierWithGroupSync();").count()
+}
+
+#[test]
+fn one_wave_compute_separates_consecutive_lds_writes() {
+    let h = compute_with(&consecutive_lds(), [0, 8, 8, 1]);
+    assert!(h.contains("[numthreads(8, 8, 1)]"), "{h}");
+    assert_eq!(barriers_between_first_lds(&h), 1, "{h}");
+
+    let big = compute_with(&consecutive_lds(), [0, 16, 16, 1]);
+    assert!(big.contains("[numthreads(16, 16, 1)]"), "{big}");
+    assert_eq!(barriers_between_first_lds(&big), 0, "{big}");
+
+    let reads = compute_with(&consecutive_reads(), [0, 8, 8, 1]);
+    assert_eq!(barriers_between_first_lds(&reads), 0, "{reads}");
+
+    let mut barred = consecutive_lds().to_vec();
+    barred.insert(2, 0xbf8a_0000);
+    let barred = compute_with(&barred, [0, 8, 8, 1]);
+    assert_eq!(barriers_between_first_lds(&barred), 1, "{barred}");
+
+    let unknown = compute_with(&consecutive_lds(), [0; 4]);
+    assert_eq!(barriers_between_first_lds(&unknown), 0, "{unknown}");
+}
