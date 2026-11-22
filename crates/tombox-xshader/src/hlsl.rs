@@ -6401,7 +6401,11 @@ impl<'a> Emitter<'a> {
             // thread-group id in the three SGPRs following the user-data (root-parameter)
             // registers, thread-group size in the ISA preamble dwords 1..3.
             let p = ex.isa_preamble;
-            let (tx, ty_, tz) = (p[1].max(1), p[2].max(1), p[3].max(1));
+            let (tx, ty_, tz) = if p[1] != 0 || p[2] != 0 || p[3] != 0 {
+                (p[1].max(1), p[2].max(1), p[3].max(1))
+            } else {
+                ex.psv_numthreads.map(|t| (t[0], t[1], t[2])).unwrap_or((1, 1, 1))
+            };
             let nparams = ex.root_sig.as_ref().map(|r| r.params.len()).unwrap_or(4);
             let g = self.cs_tgid_base(nparams);
             let _ = writeln!(h, "[numthreads({tx}, {ty_}, {tz})]

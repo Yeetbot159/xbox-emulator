@@ -39,6 +39,7 @@ fn shader(stage: Stage, words: &[u32], input_sig: Vec<SigElement>, output_sig: V
         isa,
         isa_offset_in_fssm: 0,
         isa_preamble: [0; 4],
+        psv_numthreads: None,
         has_input_sig: true,
         has_output_sig: true,
         has_psv0: false,
@@ -421,4 +422,21 @@ fn durango_vertex_fetch_call_synthesizes_attributes_from_input_signature() {
     assert!(t.hlsl.contains("v7 = asuint(i.i0.w);"), "Missing v7 init:\n{}", t.hlsl);
     assert!(t.hlsl.contains("v8 = asuint(i.i1.x);"), "Missing v8 init:\n{}", t.hlsl);
     assert!(t.hlsl.contains("v11 = asuint(i.i1.w);"), "Missing v11 init:\n{}", t.hlsl);
+}
+
+fn compute_threads(threads: Option<[u32; 3]>, preamble: [u32; 4]) -> String {
+    let mut ex = shader(Stage::Compute, &[S_ENDPGM], vec![], vec![], None);
+    ex.psv_numthreads = threads;
+    ex.isa_preamble = preamble;
+    translate(&ex).expect("compute shader translates").hlsl
+}
+
+#[test]
+fn compute_numthreads_come_from_psv_when_the_preamble_is_zero() {
+    let h = compute_threads(Some([4, 2, 1]), [0; 4]);
+    assert!(h.contains("[numthreads(4, 2, 1)]"), "{h}");
+    let preamble = compute_threads(Some([4, 2, 1]), [0, 8, 1, 1]);
+    assert!(preamble.contains("[numthreads(8, 1, 1)]"), "{preamble}");
+    let missing = compute_threads(None, [0; 4]);
+    assert!(missing.contains("[numthreads(1, 1, 1)]"), "{missing}");
 }
