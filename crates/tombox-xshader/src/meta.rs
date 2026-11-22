@@ -146,6 +146,25 @@ pub fn parse_psv0_mesh(info: &[u8]) -> Option<MeshInfo> {
 /// Parse the GS part of PSV0's PSVRuntimeInfo: the stage union starts at +4
 /// ({InputPrimitive u32, OutputTopology u32, OutputStreamMask u32, ...}); PSVRuntimeInfo1
 /// adds ShaderStage u8 @+24, UsesViewID u8 @+25 and MaxVertexCount u16 @+26.
+/// Compute thread-group size from a PSV0 runtime-info blob.
+///
+/// Only valid for a compute shader: the stage union starts at the first three dwords
+/// (`NumThreadsX/Y/Z`). A geometry or mesh blob stores other fields there. Each dimension
+/// must be 1..=1024 and the product must fit in a D3D12 group (1024 threads). Anything else
+/// is `None`, including a truncated header.
+pub fn parse_psv0_cs_threads(body: &[u8]) -> Option<[u32; 3]> {
+    let info_size = u32_at(body, 0).ok()? as usize;
+    if info_size < 12 {
+        return None;
+    }
+    let t = [u32_at(body, 4).ok()?, u32_at(body, 8).ok()?, u32_at(body, 12).ok()?];
+    let prod = (t[0] as u64).checked_mul(t[1] as u64)?.checked_mul(t[2] as u64)?;
+    if t.iter().any(|d| !(1..=1024).contains(d)) || prod > 1024 {
+        return None;
+    }
+    Some(t)
+}
+
 pub fn parse_psv0_gs(body: &[u8]) -> Option<GsInfo> {
     let info_size = u32_at(body, 0).ok()? as usize;
     if info_size < 28 {
@@ -370,5 +389,27 @@ mod tests {
         assert_eq!(sig_32[0].register, 0);
         assert_eq!(sig_32[0].mask, 0x0f);
         assert_eq!(sig_32[0].rw_mask, 0x0f);
+    }
+
+    use super::parse_psv0_cs_threads;
+
+    fn blob(info_size: u32, dims: [u32; 3]) -> Vec<u8> {
+        let mut b = info_size.to_le_bytes().to_vec();
+        for d in dims {
+            b.extend_from_slice(&d.to_le_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn cs_thread_counts_reject_a_bad_group_size() {
+        assert_eq!(parse_psv0_cs_threads(&blob(12, [8, 8, 1])), Some([8, 8, 1]));
+        assert_eq!(parse_psv0_cs_threads(&blob(48, [32, 1, 1])), Some([32, 1, 1]));
+        assert_eq!(parse_psv0_cs_threads(&blob(12, [32, 32, 1])), Some([32, 32, 1]));
+        assert_eq!(parse_psv0_cs_threads(&blob(8, [8, 8, 1])), None);
+        assert_eq!(parse_psv0_cs_threads(&blob(12, [0, 8, 1])), None);
+        assert_eq!(parse_psv0_cs_threads(&blob(12, [1025, 1, 1])), None);
+        assert_eq!(parse_psv0_cs_threads(&blob(12, [32, 32, 2])), None);
+        assert_eq!(parse_psv0_cs_threads(&12u32.to_le_bytes()), None);
     }
 }

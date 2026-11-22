@@ -60,9 +60,35 @@ pub(super) fn split_wide_lds(ins: &Insn) -> Result<Vec<Insn>, String> {
 }
 
 impl Emitter<'_> {
-    fn cs_threads(&self) -> (u32, u32, u32) {
+    /// Thread-group size the ISA was compiled for. A non-zero preamble wins; otherwise the
+    /// PSV0 compute dimensions. `None` when neither source recorded a size.
+    pub(super) fn declared_cs_threads(&self) -> Option<(u32, u32, u32)> {
         let p = self.ex.isa_preamble;
-        (p[1].max(1), p[2].max(1), p[3].max(1))
+        if p[1] != 0 || p[2] != 0 || p[3] != 0 {
+            return Some((p[1].max(1), p[2].max(1), p[3].max(1)));
+        }
+        self.ex.psv_numthreads.map(|t| (t[0], t[1], t[2]))
+    }
+
+    pub(super) fn cs_threads(&self) -> (u32, u32, u32) {
+        self.declared_cs_threads().unwrap_or((1, 1, 1))
+    }
+
+    /// One compute wave runs lockstep, so a console compiler can omit the barrier between
+    /// two LDS phases. HLSL does not, and a group of 64 or fewer threads is a single wave.
+    /// A real `s_barrier` already orders them, and `ds_swizzle_b32` does not touch LDS.
+    pub(super) fn one_wave_lds(&self) -> bool {
+        if self.ex.stage != crate::Stage::Compute {
+            return false;
+        }
+        if self.insns.iter().any(|i| i.enc == crate::rdna2::Enc::Sopp && i.op == 0x0a) {
+            return false;
+        }
+        let Some((x, y, z)) = self.declared_cs_threads() else {
+            return false;
+        };
+        let n = (x as u64).saturating_mul(y as u64).saturating_mul(z as u64);
+        n > 0 && n <= 64 && self.insns.iter().any(|i| i.enc == crate::rdna2::Enc::Ds && i.mnemonic != "ds_swizzle_b32")
     }
 
     pub(super) fn xlane_header(&self) -> Result<Option<String>, String> {
