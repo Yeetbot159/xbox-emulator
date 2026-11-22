@@ -143,21 +143,20 @@ pub fn parse_psv0_mesh(info: &[u8]) -> Option<MeshInfo> {
     }
 }
 
-/// Parse the GS part of PSV0's PSVRuntimeInfo: the stage union starts at +4
-/// ({InputPrimitive u32, OutputTopology u32, OutputStreamMask u32, ...}); PSVRuntimeInfo1
-/// adds ShaderStage u8 @+24, UsesViewID u8 @+25 and MaxVertexCount u16 @+26.
 /// Compute thread-group size from a PSV0 runtime-info blob.
 ///
-/// Only valid for a compute shader: the stage union starts at the first three dwords
-/// (`NumThreadsX/Y/Z`). A geometry or mesh blob stores other fields there. Each dimension
-/// must be 1..=1024 and the product must fit in a D3D12 group (1024 threads). Anything else
-/// is `None`, including a truncated header.
+/// `NumThreadsX/Y/Z` are the first fields of `PSVRuntimeInfo2`, at offsets 36, 40 and 44
+/// of the runtime info (after the size dword). The stage union at the start of the info
+/// is not the thread count. Each dimension must be 1..=1024 and the product must fit in a
+/// D3D12 group (1024 threads). A runtime info shorter than 48 bytes, a bad size, or a
+/// truncated blob is `None`.
 pub fn parse_psv0_cs_threads(body: &[u8]) -> Option<[u32; 3]> {
     let info_size = u32_at(body, 0).ok()? as usize;
-    if info_size < 12 {
+    if info_size < 48 {
         return None;
     }
-    let t = [u32_at(body, 4).ok()?, u32_at(body, 8).ok()?, u32_at(body, 12).ok()?];
+    let info = body.get(4..4 + info_size)?;
+    let t = [u32_at(info, 36).ok()?, u32_at(info, 40).ok()?, u32_at(info, 44).ok()?];
     let prod = (t[0] as u64).checked_mul(t[1] as u64)?.checked_mul(t[2] as u64)?;
     if t.iter().any(|d| !(1..=1024).contains(d)) || prod > 1024 {
         return None;
@@ -165,6 +164,9 @@ pub fn parse_psv0_cs_threads(body: &[u8]) -> Option<[u32; 3]> {
     Some(t)
 }
 
+/// Parse the GS part of PSV0's PSVRuntimeInfo: the stage union starts at +4
+/// ({InputPrimitive u32, OutputTopology u32, OutputStreamMask u32, ...}); PSVRuntimeInfo1
+/// adds ShaderStage u8 @+24, UsesViewID u8 @+25 and MaxVertexCount u16 @+26.
 pub fn parse_psv0_gs(body: &[u8]) -> Option<GsInfo> {
     let info_size = u32_at(body, 0).ok()? as usize;
     if info_size < 28 {
@@ -394,22 +396,30 @@ mod tests {
     use super::parse_psv0_cs_threads;
 
     fn blob(info_size: u32, dims: [u32; 3]) -> Vec<u8> {
-        let mut b = info_size.to_le_bytes().to_vec();
-        for d in dims {
-            b.extend_from_slice(&d.to_le_bytes());
+        let mut b = vec![0u8; 4 + info_size as usize];
+        b[..4].copy_from_slice(&info_size.to_le_bytes());
+        if (info_size as usize) >= 48 {
+            for (i, d) in dims.iter().enumerate() {
+                let o = 4 + 36 + i * 4;
+                b[o..o + 4].copy_from_slice(&d.to_le_bytes());
+            }
         }
         b
     }
 
     #[test]
     fn cs_thread_counts_reject_a_bad_group_size() {
-        assert_eq!(parse_psv0_cs_threads(&blob(12, [8, 8, 1])), Some([8, 8, 1]));
+        assert_eq!(parse_psv0_cs_threads(&blob(48, [8, 8, 1])), Some([8, 8, 1]));
         assert_eq!(parse_psv0_cs_threads(&blob(48, [32, 1, 1])), Some([32, 1, 1]));
-        assert_eq!(parse_psv0_cs_threads(&blob(12, [32, 32, 1])), Some([32, 32, 1]));
-        assert_eq!(parse_psv0_cs_threads(&blob(8, [8, 8, 1])), None);
-        assert_eq!(parse_psv0_cs_threads(&blob(12, [0, 8, 1])), None);
-        assert_eq!(parse_psv0_cs_threads(&blob(12, [1025, 1, 1])), None);
-        assert_eq!(parse_psv0_cs_threads(&blob(12, [32, 32, 2])), None);
-        assert_eq!(parse_psv0_cs_threads(&12u32.to_le_bytes()), None);
+        assert_eq!(parse_psv0_cs_threads(&blob(48, [32, 32, 1])), Some([32, 32, 1]));
+        assert_eq!(parse_psv0_cs_threads(&blob(36, [8, 8, 1])), None);
+        assert_eq!(parse_psv0_cs_threads(&blob(12, [8, 8, 1])), None);
+        assert_eq!(parse_psv0_cs_threads(&blob(48, [0, 8, 1])), None);
+        assert_eq!(parse_psv0_cs_threads(&blob(48, [1025, 1, 1])), None);
+        assert_eq!(parse_psv0_cs_threads(&blob(48, [32, 32, 2])), None);
+        assert_eq!(parse_psv0_cs_threads(&48u32.to_le_bytes()), None);
+        let mut union_only = blob(48, [4, 2, 1]);
+        union_only[4..16].copy_from_slice(&[8, 0, 0, 0, 8, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(parse_psv0_cs_threads(&union_only), Some([4, 2, 1]));
     }
 }
