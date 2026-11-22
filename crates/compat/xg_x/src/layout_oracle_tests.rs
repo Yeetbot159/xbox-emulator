@@ -371,14 +371,6 @@ fn depth_bind_planar_msaa_planes_match_console() {
                         d[0x1c..0x1e].copy_from_slice(&arr.to_le_bytes());
                         let (mut t, mut u): (*mut c_void, *mut c_void) = (core::ptr::null_mut(), core::ptr::null_mut());
                         let (ht, hu) = (theirs(d.as_ptr(), &mut t), XGCreateTextureComputer(d.as_ptr(), &mut u));
-                        if matches!(fmt, 22 | 47 | 120) {
-                            assert!(hu < 0 && u.is_null(), "{name} ours={hu:#x}: the stencil-only views have no depth plane row to lay out");
-                            if ht >= 0 {
-                                release(t);
-                            }
-                            rejected += 1;
-                            continue;
-                        }
                         assert_eq!(ht < 0, hu < 0, "{name} console={ht:#x} ours={hu:#x}");
                         if ht < 0 {
                             rejected += 1;
@@ -437,7 +429,13 @@ fn compute_depth_msaa_only_lays_out_single_mip_planar_depth() {
     assert_eq!(planes.iter().map(|p| (p.bpe, p.offset)).collect::<Vec<_>>(), vec![(4, 0), (1, planes[0].size.div_ceil(planes[1].align) * planes[1].align)]);
     assert_eq!(l.size, planes[1].offset + planes[1].size);
     assert!(planes.iter().all(|p| p.mips.len() == 1 && p.mips[0].samples == 2));
-    for bad in [d(19, 1, 1), d(19, 2, 0), d(19, 2, 2), d(40, 4, 1), d(28, 4, 1)] {
+    for (view, full) in [(22u32, 20u32), (47, 45), (120, 118)] {
+        let stencil = layout::compute_depth_msaa(&d(view, 4, 1)).unwrap_or_else(|| panic!("stencil view {view}"));
+        let both = layout::compute_depth_msaa(&d(full, 4, 1)).unwrap_or_else(|| panic!("depth+stencil {full}"));
+        assert_eq!(stencil.dxgi, view);
+        assert_eq!((stencil.size, stencil.align, stencil.planes), (both.size, both.align, both.planes), "fmt {view} uses the planes of fmt {full}");
+    }
+    for bad in [d(19, 1, 1), d(19, 2, 0), d(19, 2, 2), d(40, 4, 1), d(28, 4, 1), d(21, 4, 1), d(22, 1, 1)] {
         assert_eq!(layout::compute_depth_msaa(&bad), None, "{bad:?}");
     }
     assert_eq!(compute(&d(19, 2, 1)), None);

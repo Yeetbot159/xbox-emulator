@@ -552,11 +552,34 @@ pub fn is_depth_stencil_planar(dxgi: u32) -> bool {
     ROWS.get(dxgi as usize).is_some_and(|r| r[4] == 1 && r[5] != 0 && r[6] != 0)
 }
 
+/// Format whose depth and stencil plane rows size an MSAA depth resource.
+///
+/// A stencil-only view (22 X24_TYPELESS_G8, 47 X32_TYPELESS_G8X24, 120) has a
+/// stencil plane row and a zero depth-plane id. The console still reserves both
+/// planes of the depth+stencil format in that family (20, 45, 118).
+pub fn depth_msaa_source(dxgi: u32) -> Option<u32> {
+    if is_depth_stencil_planar(dxgi) {
+        return Some(dxgi);
+    }
+    let sibling = match dxgi {
+        22 => 20,
+        47 => 45,
+        120 => 118,
+        _ => return None,
+    };
+    is_depth_stencil_planar(sibling).then_some(sibling)
+}
+
 pub fn compute_depth_msaa(d: &Desc) -> Option<Layout> {
-    if d.samples <= 1 || d.dimension != 3 || d.mips != 1 || !is_depth_stencil_planar(d.dxgi) {
+    if d.samples <= 1 || d.dimension != 3 || d.mips != 1 {
         return None;
     }
-    compute_with(d, true)
+    let source = depth_msaa_source(d.dxgi)?;
+    let mut sized = *d;
+    sized.dxgi = source;
+    let mut l = compute_with(&sized, true)?;
+    l.dxgi = d.dxgi;
+    Some(l)
 }
 
 fn compute_with(d: &Desc, msaa_planes: bool) -> Option<Layout> {

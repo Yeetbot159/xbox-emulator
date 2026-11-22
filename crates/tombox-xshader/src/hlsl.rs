@@ -5184,10 +5184,14 @@ impl<'a> Emitter<'a> {
     /// address decodes exactly as (vertex = A >> 12, slot = (A & 0xfff) >> 2).
     fn gs_dims(&self) -> Result<(usize, usize, usize, &'static str, &'static str), String> {
         let gi = self.ex.gs_info.ok_or("geometry shader without PSV0 GS info")?;
+        // D3D_PRIMITIVE, the same codes PSV0 stores (see `GsInfo`): 6 and 7 are the
+        // adjacency forms. HLSL names them lineadj (4 vertices) and triangleadj (6).
         let (prim, nv) = match gi.input_primitive {
             1 => ("point", 1usize),
             2 => ("line", 2),
             3 => ("triangle", 3),
+            6 => ("lineadj", 4),
+            7 => ("triangleadj", 6),
             other => return Err(format!("GS input primitive {other} unsupported")),
         };
         let stream = match gi.output_topology {
@@ -6312,7 +6316,21 @@ void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {{");
             for rname in ["s3", "v0", "v1"] {
                 self.regs.insert(rname.to_string());
             }
-            let _ = writeln!(init, "    s3 = 0x100u; v0 = 0x04000000u; v1 = 0x800u;");
+            // Vertex k lives at dword offset k*0x400, packed the way WriteToSliceMainGS
+            // packs the first three: v0 = off0 | off1<<16, v1 = off2 (high half 0, there
+            // is no fourth vertex). Adjacency continues that packing: lineadj puts off3
+            // in v1's high half, triangleadj puts off4|off5<<16 in v2.
+            let _ = if nv <= 3 {
+                writeln!(init, "    s3 = 0x100u; v0 = 0x04000000u; v1 = 0x800u;")
+            } else {
+                let pack = |a: u32, b: u32| (a * 0x400) | ((b * 0x400) << 16);
+                if nv > 4 {
+                    self.regs.insert("v2".to_string());
+                    writeln!(init, "    s3 = 0x100u; v0 = {:#x}u; v1 = {:#x}u; v2 = {:#x}u;", pack(0, 1), pack(2, 3), pack(4, 5))
+                } else {
+                    writeln!(init, "    s3 = 0x100u; v0 = {:#x}u; v1 = {:#x}u;", pack(0, 1), pack(2, 3))
+                }
+            };
         }
         if !is_ps && !self.is_gs {
             let mut group = 0usize;

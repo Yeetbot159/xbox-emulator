@@ -326,7 +326,7 @@ pub extern "system" fn XGCreateTextureComputerWithPitch(desc: *const u8, pitch: 
         return E_INVALIDARG;
     };
     d.pitch = pitch;
-    if rd(desc, 0x30) & 2 != 0 && d.samples > 1 && layout::is_depth_stencil_planar(d.dxgi) {
+    if rd(desc, 0x30) & 2 != 0 && d.samples > 1 && layout::depth_msaa_source(d.dxgi).is_some() {
         return finish_with("XGCreateTextureComputer", Some(d), pp, layout::compute_depth_msaa);
     }
     finish("XGCreateTextureComputer", Some(d), pp)
