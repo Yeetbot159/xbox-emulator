@@ -1060,6 +1060,13 @@ mod tests {
         let w = words(&skipped.isa);
         assert_eq!(w[0] & 0xffff, (w.len() - 2) as u32);
         assert_eq!(w[w.len() - 1], 0xbf810000);
+        // VOP3 form, no modifiers: same compare. An abs bit is refused rather than dropped.
+        let vop3 = [0xd21a_0001, 256 | (258 << 9)];
+        let l = to_rdna2(&bytes(&[vop3[0], vop3[1], 0xbf810000])).unwrap();
+        let names: Vec<_> = crate::rdna2::disassemble(&l.isa[..l.code_len]).into_iter().map(|i| i.mnemonic).collect();
+        assert_eq!(names, ["s_mov_b32", "s_mov_b32", "v_cmp_lt_f32", "v_cndmask_b32", "s_mov_b32", "s_mov_b32", "s_endpgm"]);
+        let e = to_rdna2(&bytes(&[vop3[0] | 0x100, vop3[1], 0xbf810000])).unwrap_err();
+        assert!(e.contains("modifiers"), "{e}");
     }
 
     #[test]
