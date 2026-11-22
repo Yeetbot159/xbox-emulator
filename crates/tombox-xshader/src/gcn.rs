@@ -408,6 +408,10 @@ fn convert(ins: &Insn) -> Result<Vec<u32>, String> {
             ins.words.clone()
         }
         Enc::Mimg => {
+            // GFX7 has no dim field. DA only says the address includes an array index,
+            // so this is still a 2D / 2D-array guess. Bits 15..17 are R128, TFE and LWE
+            // on GFX7 and A16, D16 and a reserved bit on RDNA2. Passing them through would
+            // compile a different image operation, so they are refused.
             for (bit, name) in [(15, "R128 (128-bit resource descriptor)"), (16, "TFE (texture fail status VGPR)"), (17, "LWE (LOD warning status)")] {
                 if (w >> bit) & 1 != 0 {
                     return Err(err(format!("MIMG {name} is not translated")));
@@ -415,7 +419,8 @@ fn convert(ins: &Insn) -> Result<Vec<u32>, String> {
             }
             let da = (w >> 14) & 1;
             let dim = if da != 0 { 5 } else { 1 };
-            vec![(w & !(1 << 14)) | dim << 3, ins.words[1]]
+            let keep = !(1 << 14 | 1 << 15 | 1 << 16 | 1 << 17);
+            vec![(w & keep) | dim << 3, ins.words[1]]
         }
         Enc::Mtbuf => {
             if (w >> 15) & 1 != 0 {
