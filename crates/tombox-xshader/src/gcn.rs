@@ -158,6 +158,7 @@ enum Vop2Map {
     Vop3(u32),
     Vop3Swap(u32),
     Vop3Carry(u32),
+    PkU8,
 }
 
 fn vop2_map(op: u32) -> Result<Vop2Map, String> {
@@ -184,7 +185,7 @@ fn vop2_map(op: u32) -> Result<Vop2Map, String> {
         0x31 => Vop3(0x36b),
         0x0d => return Err("v_min_legacy_f32 (gfx7 VOP2 0x0d) has no RDNA2 equivalent yet".into()),
         0x0e => return Err("v_max_legacy_f32 (gfx7 VOP2 0x0e) has no RDNA2 equivalent yet".into()),
-        0x2c => return Err("v_cvt_pkaccum_u8_f32 (gfx7 VOP2 0x2c) has no RDNA2 equivalent yet".into()),
+        0x2c => PkU8,
         _ => return Err(format!("gfx7 VOP2 opcode {op:#x} is not defined")),
     })
 }
@@ -344,6 +345,11 @@ fn convert(ins: &Insn) -> Result<Vec<u32>, String> {
                     v.extend(lit);
                     v
                 }
+                Vop2Map::PkU8 => {
+                    let mut v = vop3(0x15e, vdst, 0, 0, [src0, vsrc1, vsrc1], 0, 0).to_vec();
+                    v.extend(lit);
+                    v
+                }
             }
         }
         Enc::Vop1 => {
@@ -384,6 +390,12 @@ fn convert(ins: &Insn) -> Result<Vec<u32>, String> {
                             vop3(n, vdst, a, clamp, [s[1], s[0], s[2]], omod, ng).to_vec()
                         }
                         Vop2Map::Vop3Carry(n) => vop3b(n, vdst, sdst, 0, s, omod, neg).to_vec(),
+                        Vop2Map::PkU8 => {
+                            if clamp | omod != 0 || abs & 6 != 0 || neg & 6 != 0 {
+                                return Err(err("v_cvt_pkaccum_u8_f32 modifiers other than abs/neg on the float are not supported".into()));
+                            }
+                            vop3(0x15e, vdst, abs, 0, [s[0], s[1], s[1]], 0, neg).to_vec()
+                        }
                     },
                 },
                 0x16d | 0x16e | 0x176 | 0x177 => vop3b(op, vdst, sdst, 0, s, omod, neg).to_vec(),
@@ -875,6 +887,56 @@ mod tests {
         assert_eq!(words(&l.isa), [0xbe802100, 0xbe840303, 0xbe850380, 0xbf810000]);
         let d = crate::rdna2::disassemble(&l.isa);
         assert_eq!(d[0].mnemonic, "s_swappc_b64");
+    }
+
+    fn pk_word(op: u32, vdst: u32, vsrc1: u32, src0: u32) -> u32 {
+        (op << 25) | (vdst << 17) | (vsrc1 << 9) | src0
+    }
+
+    fn translate_lowered(isa: &[u8]) -> Result<String, String> {
+        let ex = crate::ShaderExtract {
+            stage: crate::Stage::Compute,
+            shader_model: (6, 0),
+            bitcode_stripped: true,
+            fssm: Vec::new(),
+            entry: Some("main".into()),
+            isa: isa.to_vec(),
+            isa_offset_in_fssm: 0,
+            isa_preamble: [0, 1, 1, 1],
+            isa_data: isa.to_vec(),
+            has_input_sig: false,
+            has_output_sig: false,
+            has_psv0: false,
+            has_root_sig: false,
+            input_sig: Vec::new(),
+            output_sig: Vec::new(),
+            resources: Vec::new(),
+            gs_info: None,
+            root_sig: None,
+        };
+        crate::hlsl::translate(&ex).map(|t| t.hlsl)
+    }
+
+    #[test]
+    fn pkaccum_u8_updates_the_byte_selected_by_its_integer_source() {
+        let op = pk_word(0x2c, 1, 2, 256);
+        let l = to_rdna2(&bytes(&[op, 0xbf810000])).unwrap();
+        let d = crate::rdna2::disassemble(&l.isa[..l.code_len]);
+        assert_eq!(d[0].mnemonic, "v_cvt_pk_u8_f32");
+        use crate::rdna2::Opnd;
+        assert_eq!(d[0].src, vec![Opnd::Vgpr(0), Opnd::Vgpr(2), Opnd::Vgpr(2)]);
+        assert_eq!(d[0].dst, vec![Opnd::Vgpr(1)]);
+        let h = translate_lowered(&l.isa[..l.code_len]).unwrap();
+        assert!(h.contains("((v2) & 3u) * 8u"), "{h}");
+        assert!(h.contains("clamp(tb_rne("), "{h}");
+        assert!(h.contains("tb_nan("), "{h}");
+        let vop3 = [0xd000_0001 | (0x12c << 17), 256 | (258 << 9)];
+        let e = to_rdna2(&bytes(&[vop3[0] | (1 << 11), vop3[1], 0xbf810000])).unwrap_err();
+        assert!(e.contains("modifiers"), "{e}");
+        let l = to_rdna2(&bytes(&[vop3[0], vop3[1], 0xbf810000])).unwrap();
+        let d = crate::rdna2::disassemble(&l.isa[..l.code_len]);
+        assert_eq!(d[0].mnemonic, "v_cvt_pk_u8_f32");
+        assert_eq!(d[0].src, vec![Opnd::Vgpr(0), Opnd::Vgpr(2), Opnd::Vgpr(2)]);
     }
 
     #[test]
