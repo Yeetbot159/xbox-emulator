@@ -2207,9 +2207,18 @@ impl<'a> Emitter<'a> {
     }
 
     fn lds_order(&mut self, writes: bool, reads: bool) {
-        let hazard = (reads && self.lds_w_pending) || (writes && self.lds_r_pending);
+        let crossed = (reads && self.lds_w_pending) || (writes && self.lds_r_pending);
+        let pending = self.lds_w_pending || self.lds_r_pending;
+        // A one-wave group also needs a barrier between two writes or two reads: the
+        // console wave does not reorder them, and the HLSL compiler may.
+        let wave = self.one_wave_lds();
+        let hazard = crossed || (wave && pending && (writes || reads));
         if hazard && self.brace_depth == 0 && self.loop_depth == 0 {
-            self.line("GroupMemoryBarrierWithGroupSync();");
+            if wave && !crossed {
+                self.line("GroupMemoryBarrierWithGroupSync(); // wave_lds_sync");
+            } else {
+                self.line("GroupMemoryBarrierWithGroupSync();");
+            }
             self.lds_w_pending = false;
             self.lds_r_pending = false;
         }
@@ -6179,9 +6188,9 @@ impl<'a> Emitter<'a> {
         if self.is_cs {
             // Compute ABI (from ClearCS + FSSM metadata): local thread id in v0..v2, the
             // thread-group id in the three SGPRs following the user-data (root-parameter)
-            // registers, thread-group size in the ISA preamble dwords 1..3.
-            let p = ex.isa_preamble;
-            let (tx, ty_, tz) = (p[1].max(1), p[2].max(1), p[3].max(1));
+            // registers. The group size is the ISA preamble, or the PSV0 compute dimensions
+            // when that preamble is zero.
+            let (tx, ty_, tz) = self.cs_threads();
             let nparams = ex.root_sig.as_ref().map(|r| r.params.len()).unwrap_or(4);
             let g = self.cs_tgid_base(nparams);
             let _ = writeln!(h, "[numthreads({tx}, {ty_}, {tz})]

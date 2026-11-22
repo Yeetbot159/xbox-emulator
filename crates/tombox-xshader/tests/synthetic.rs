@@ -39,6 +39,7 @@ fn shader(stage: Stage, words: &[u32], input_sig: Vec<SigElement>, output_sig: V
         isa,
         isa_offset_in_fssm: 0,
         isa_preamble: [0; 4],
+        psv_numthreads: None,
         has_input_sig: true,
         has_output_sig: true,
         has_psv0: false,
@@ -350,4 +351,41 @@ fn amplification_dispatch_uses_the_y_and_z_group_counts() {
         "{}",
         t.hlsl
     );
+}
+
+fn compute_with(words: &[u32], threads: Option<[u32; 3]>, preamble: [u32; 4]) -> String {
+    let mut ex = shader(Stage::Compute, words, vec![], vec![], None);
+    ex.psv_numthreads = threads;
+    ex.isa_preamble = preamble;
+    translate(&ex).expect("compute shader translates").hlsl
+}
+
+/// Two `ds_write_b32` then a `ds_read_b32`. Consecutive writes share a direction,
+/// so the ordinary read/write hazard does not separate them.
+fn consecutive_lds() -> [u32; 7] {
+    [0xd834_0000, 0x0000_0909, 0xd834_0000, 0x0000_0a09, 0xd8d8_0000, 0x0700_0007, S_ENDPGM]
+}
+
+#[test]
+fn one_wave_compute_separates_consecutive_lds_writes() {
+    let mark = "GroupMemoryBarrierWithGroupSync(); // wave_lds_sync";
+    let h = compute_with(&consecutive_lds(), Some([8, 8, 1]), [0; 4]);
+    assert!(h.contains("[numthreads(8, 8, 1)]"), "{h}");
+    let body = h.split("void main").nth(1).expect("compute entry");
+    let first = body.find("tb_lds[").expect("first LDS access");
+    let second = body[first + 1..].find("tb_lds[").map(|p| first + 1 + p).expect("second LDS access");
+    assert!(body[first..second].contains(mark), "{body}");
+
+    let big = compute_with(&consecutive_lds(), Some([16, 16, 1]), [0; 4]);
+    assert!(big.contains("[numthreads(16, 16, 1)]"), "{big}");
+    assert!(!big.contains("wave_lds_sync"), "{big}");
+
+    let mut barred = consecutive_lds().to_vec();
+    barred.insert(2, 0xbf8a_0000); // s_barrier between the two writes
+    let barred = compute_with(&barred, Some([8, 8, 1]), [0; 4]);
+    assert!(!barred.contains("wave_lds_sync"), "{barred}");
+
+    let preamble = compute_with(&consecutive_lds(), Some([8, 8, 1]), [0, 4, 4, 1]);
+    assert!(preamble.contains("[numthreads(4, 4, 1)]"), "{preamble}");
+    assert!(preamble.contains(mark), "{preamble}");
 }
