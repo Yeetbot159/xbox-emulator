@@ -275,35 +275,10 @@ fn legacy_minmax(max: bool, vdst: u32, src0: u32, src1: u32, lit: Option<u32>) -
     if vdst > 255 {
         return Err(format!("{which} destination {vdst} is not a VGPR"));
     }
-    let scratch = |c: u32| matches!(c, 104 | 105 | 106 | 107);
-    if scratch(src0) || scratch(src1) {
-        return Err(format!("{which} source aliases vcc or s104:s105, which hold the saved vcc"));
-    }
-    if max && (matches!(vdst, 254 | 255) || matches!(src0, 510 | 511) || matches!(src1, 510 | 511)) {
-        return Err(format!("{which} needs v254 and v255 for the signed-zero case, and this instruction uses them"));
+    if matches!(src0, 104 | 105) || matches!(src1, 104 | 105) {
+        return Err(format!("{which} source aliases s104:s105, which hold the compare"));
     }
     let mut out = Vec::new();
-    let sop1 = |sdst: u32, ssrc: u32| 0xBE80_0000 | (sdst & 0x7f) << 16 | 0x03 << 8 | (ssrc & 0xff);
-    let vop1 = |op: u32, dst: u32, src: u32| 0x7E00_0000 | (dst & 0xff) << 17 | (op & 0xff) << 9 | (src & 0x1ff);
-    let vop2 = |op: u32, dst: u32, vsrc1: u32, src: u32| (op & 0x3f) << 25 | (dst & 0xff) << 17 | (vsrc1 & 0xff) << 9 | (src & 0x1ff);
-    let vopc = |op: u32, vsrc1: u32, src: u32| 0x7C00_0000 | (op & 0xff) << 17 | (vsrc1 & 0xff) << 9 | (src & 0x1ff);
-    let lit_of = |src: u32| -> Result<Option<u32>, String> {
-        if src == 255 { lit.ok_or_else(|| format!("{which} literal source is missing")).map(Some) } else { Ok(None) }
-    };
-    let mag = |out: &mut Vec<u32>, tmp: u32, src: u32| -> Result<(), String> {
-        let vgpr = if src >= 256 {
-            src - 256
-        } else {
-            out.push(vop1(1, tmp, src));
-            if let Some(k) = lit_of(src)? {
-                out.push(k);
-            }
-            tmp
-        };
-        out.push(vop2(0x1b, tmp, vgpr, 255));
-        out.push(0x7fff_ffff);
-        Ok(())
-    };
     let with_lit = |out: &mut Vec<u32>, words: [u32; 2], srcs: &[u32]| -> Result<(), String> {
         out.extend_from_slice(&words);
         if srcs.iter().any(|&s| s == 255) {
@@ -311,21 +286,9 @@ fn legacy_minmax(max: bool, vdst: u32, src0: u32, src1: u32, lit: Option<u32>) -
         }
         Ok(())
     };
-    out.push(sop1(104, 106));
-    out.push(sop1(105, 107));
-    if max {
-        mag(&mut out, 254, src0)?;
-        mag(&mut out, 255, src1)?;
-        out.push(vop2(0x1c, 254, 255, 256 + 254));
-    }
-    with_lit(&mut out, vop3(if max { 4 } else { 1 }, SGPR_VCC, 0, 0, [src0, src1, 128], 0, 0), &[src0, src1])?;
-    with_lit(&mut out, vop3(0x101, vdst, 0, 0, [src1, src0, SGPR_VCC], 0, 0), &[src0, src1])?;
-    if max {
-        out.push(vopc(0xc2, 254, 128));
-        with_lit(&mut out, vop3(0x101, vdst, 0, 0, [256 + vdst, src0, SGPR_VCC], 0, 0), &[src0])?;
-    }
-    out.push(sop1(107, 105));
-    out.push(sop1(106, 104));
+    let cmp = if max { 6 } else { 1 };
+    with_lit(&mut out, vop3(cmp, 104, 0, 0, [src0, src1, 128], 0, 0), &[src0, src1])?;
+    with_lit(&mut out, vop3(0x101, vdst, 0, 0, [src1, src0, 104], 0, 0), &[src0, src1])?;
     Ok(out)
 }
 
@@ -641,7 +604,6 @@ pub fn lower(code: &[u8], data: &[u8]) -> Result<Lowered, String> {
     let mut pcs = Vec::new();
     let mut expanded: Vec<std::ops::Range<usize>> = Vec::new();
     let mut legacy: Vec<std::ops::Range<usize>> = Vec::new();
-    let mut legacy_max = false;
     let mut pos = 0usize;
     for (k, ins) in insns.iter().enumerate() {
         match sop1_op(ins) {
@@ -660,23 +622,21 @@ pub fn lower(code: &[u8], data: &[u8]) -> Result<Lowered, String> {
         if ins.enc == Enc::Mubuf && (ins.words[0] >> 15) & 1 != 0 {
             expanded.push(pos..pos + v.len());
         }
-        let (is_legacy, is_max) = match ins.enc {
-            Enc::Vop2 => {
-                let op = (ins.words[0] >> 25) & 0x3f;
-                (matches!(op, 0x0d | 0x0e), op == 0x0e)
-            }
-            Enc::Vop3 => {
-                let op = (ins.words[0] >> 17) & 0x1ff;
-                (matches!(op, 0x10d | 0x10e), op == 0x10e)
-            }
-            _ => (false, false),
+        let is_legacy = match ins.enc {
+            Enc::Vop2 => matches!((ins.words[0] >> 25) & 0x3f, 0x0d | 0x0e),
+            Enc::Vop3 => matches!((ins.words[0] >> 17) & 0x1ff, 0x10d | 0x10e),
+            _ => false,
         };
         if is_legacy {
             legacy.push(pos..pos + v.len());
-            legacy_max |= is_max;
+            let max = match ins.enc {
+                Enc::Vop2 => (ins.words[0] >> 25) & 0x3f == 0x0e,
+                Enc::Vop3 => (ins.words[0] >> 17) & 0x1ff == 0x10e,
+                _ => false,
+            };
             notes.push(format!(
                 "{} at {:#x}: compare/select, so a NaN in source 1 stays NaN",
-                if is_max { "v_max_legacy_f32" } else { "v_min_legacy_f32" },
+                if max { "v_max_legacy_f32" } else { "v_min_legacy_f32" },
                 ins.offset
             ));
         }
@@ -733,24 +693,17 @@ pub fn lower(code: &[u8], data: &[u8]) -> Result<Lowered, String> {
         }
         notes.push(format!("{} MUBUF addr64 access(es) lowered to GLOBAL through v{ADDR64_LO}:v{ADDR64_HI}", expanded.len()));
     }
-    if legacy_max && !expanded.is_empty() {
-        return Err("gfx7 v_max_legacy_f32 and MUBUF addr64 both need v254 and v255".into());
-    }
     if !legacy.is_empty() {
         use crate::rdna2::Opnd;
         for i in crate::rdna2::disassemble(&isa[..code_len]) {
             if legacy.iter().any(|r| r.contains(&(i.offset / 4))) {
                 continue;
             }
-            let clash = i.src.iter().chain(i.dst.iter()).any(|o| {
-                matches!(o, Opnd::Sgpr(104 | 105)) || (legacy_max && matches!(o, Opnd::Vgpr(254 | 255)))
-            });
+            let clash = i.src.iter().chain(i.dst.iter()).any(|o| matches!(o, Opnd::Sgpr(104 | 105)));
             if clash {
                 return Err(format!(
-                    "gfx7 legacy min/max keeps the old vcc in s104:s105{} but {} at lowered {:#x} uses them",
-                    if legacy_max { " and the signed-zero test in v254:v255" } else { "" },
-                    i.mnemonic,
-                    i.offset
+                    "gfx7 legacy min/max writes its compare into s104:s105 but {} at lowered {:#x} uses them",
+                    i.mnemonic, i.offset
                 ));
             }
         }
@@ -1008,6 +961,7 @@ mod tests {
             isa: isa.to_vec(),
             isa_offset_in_fssm: 0,
             isa_preamble: [0, 1, 1, 1],
+            psv_numthreads: None,
             isa_data: isa.to_vec(),
             has_input_sig: false,
             has_output_sig: false,
@@ -1028,10 +982,10 @@ mod tests {
         let l = to_rdna2(&bytes(&[op, 0xbf810000])).unwrap();
         let d = crate::rdna2::disassemble(&l.isa[..l.code_len]);
         let names: Vec<_> = d.iter().map(|i| i.mnemonic.as_str()).collect();
-        assert_eq!(
-            names,
-            ["s_mov_b32", "s_mov_b32", "v_cmp_lt_f32", "v_cndmask_b32", "s_mov_b32", "s_mov_b32", "s_endpgm"]
-        );
+        assert_eq!(names, ["v_cmp_lt_f32", "v_cndmask_b32", "s_endpgm"]);
+        use crate::rdna2::Opnd;
+        assert_eq!(d[0].dst, vec![Opnd::Sgpr(104)]);
+        assert_eq!(d[1].src, vec![Opnd::Vgpr(2), Opnd::Vgpr(0), Opnd::Sgpr(104)]);
         let h = translate_lowered(&l.isa[..l.code_len]).unwrap();
         assert!(h.contains("asfloat(v0) < asfloat(v2)"), "{h}");
         assert!(h.contains("? v0 : v2"), "{h}");
@@ -1043,7 +997,7 @@ mod tests {
         let vop3 = [0xd21a_0001, 256 | (258 << 9)];
         let l = to_rdna2(&bytes(&[vop3[0], vop3[1], 0xbf810000])).unwrap();
         let names: Vec<_> = crate::rdna2::disassemble(&l.isa[..l.code_len]).into_iter().map(|i| i.mnemonic).collect();
-        assert_eq!(names, ["s_mov_b32", "s_mov_b32", "v_cmp_lt_f32", "v_cndmask_b32", "s_mov_b32", "s_mov_b32", "s_endpgm"]);
+        assert_eq!(names, ["v_cmp_lt_f32", "v_cndmask_b32", "s_endpgm"]);
         let e = to_rdna2(&bytes(&[vop3[0] | 0x100, vop3[1], 0xbf810000])).unwrap_err();
         assert!(e.contains("modifiers"), "{e}");
     }
@@ -1054,19 +1008,15 @@ mod tests {
         let l = to_rdna2(&bytes(&[op, 0xbf810000])).unwrap();
         let d = crate::rdna2::disassemble(&l.isa[..l.code_len]);
         let names: Vec<_> = d.iter().map(|i| i.mnemonic.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "s_mov_b32", "s_mov_b32", "v_and_b32", "v_and_b32", "v_or_b32", "v_cmp_gt_f32", "v_cndmask_b32",
-                "v_cmp_eq_u32", "v_cndmask_b32", "s_mov_b32", "s_mov_b32", "s_endpgm",
-            ]
-        );
+        assert_eq!(names, ["v_cmp_ge_f32", "v_cndmask_b32", "s_endpgm"]);
+        use crate::rdna2::Opnd;
+        assert_eq!(d[0].dst, vec![Opnd::Sgpr(104)]);
+        assert_eq!(d[1].src, vec![Opnd::Vgpr(2), Opnd::Vgpr(0), Opnd::Sgpr(104)]);
         let h = translate_lowered(&l.isa[..l.code_len]).unwrap();
-        assert!(h.contains("asfloat(v0) > asfloat(v2)"), "{h}");
-        assert!(h.contains("0x7fffffffu"), "{h}");
-        assert!(h.contains("0x0u == v254"), "{h}");
-        assert!(h.contains("? v0 : v1"), "{h}");
+        assert!(h.contains("asfloat(v0) >= asfloat(v2)"), "{h}");
+        assert!(h.contains("? v0 : v2"), "{h}");
         assert!(!h.contains("max(asfloat(v0)"), "{h}");
+        assert!(!h.contains("v254"), "{h}");
         let lit = legacy_word(0x0d, 1, 2, 255);
         let l = to_rdna2(&bytes(&[lit, 0x7fc0_0000, 0xbf810000])).unwrap();
         let h = translate_lowered(&l.isa[..l.code_len]).unwrap();
