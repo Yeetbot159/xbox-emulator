@@ -1112,7 +1112,8 @@
         "MFJoinIoPort": "implemented",
         "MFBlockThread": "implemented",
         "MFUnblockThread": "implemented",
-        "MFGetPrivateWorkqueues": "implemented"
+        "MFGetPrivateWorkqueues": "implemented",
+        "MFGetPlatform": "implemented"
       },
       "notes": {
         "MFCreateDXGISurfaceBufferX": "forwards to PC MFCreateDXGISurfaceBuffer (console drops fBottomUp for D3D12 resources)",
