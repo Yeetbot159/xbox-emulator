@@ -422,3 +422,39 @@ fn durango_vertex_fetch_call_synthesizes_attributes_from_input_signature() {
     assert!(t.hlsl.contains("v8 = asuint(i.i1.x);"), "Missing v8 init:\n{}", t.hlsl);
     assert!(t.hlsl.contains("v11 = asuint(i.i1.w);"), "Missing v11 init:\n{}", t.hlsl);
 }
+
+fn geometry(prim: u32, topo: u32) -> Result<tombox_xshader::hlsl::Translated, String> {
+    let mut ex = shader(
+        Stage::Geometry,
+        &[S_ENDPGM],
+        vec![sig("POSITION", 0, 3, 0, 0xf)],
+        vec![sig("SV_Position", 1, 3, 0, 0xf)],
+        None,
+    );
+    ex.gs_info = Some(GsInfo { input_primitive: prim, output_topology: topo, max_vertex_count: 1, mesh: None });
+    translate(&ex)
+}
+
+#[test]
+fn geometry_adjacency_primitives_translate() {
+    let tri = geometry(3, 5).expect("triangle");
+    assert!(tri.hlsl.contains("triangle SIn i[3]"), "{}", tri.hlsl);
+    assert!(tri.hlsl.contains("v0 = 0x04000000u; v1 = 0x800u;"), "{}", tri.hlsl);
+    assert!(!tri.hlsl.contains("v2 ="), "{}", tri.hlsl);
+
+    let line = geometry(6, 3).expect("lineadj");
+    assert_eq!(line.profile, "gs_5_0");
+    assert!(line.hlsl.contains("lineadj SIn i[4]"), "{}", line.hlsl);
+    assert!(line.hlsl.contains("v1 = 0xc000800u;"), "{}", line.hlsl);
+    assert!(!line.hlsl.contains("v2 ="), "{}", line.hlsl);
+
+    let adj = geometry(7, 5).expect("triangleadj");
+    assert!(adj.hlsl.contains("triangleadj SIn i[6]"), "{}", adj.hlsl);
+    assert!(adj.hlsl.contains("v2 = 0x14001000u;"), "{}", adj.hlsl);
+
+    let err = match geometry(4, 5) {
+        Err(e) => e,
+        Ok(_) => panic!("primitive 4 is not a GS input"),
+    };
+    assert!(err.contains("input primitive"), "{err}");
+}
