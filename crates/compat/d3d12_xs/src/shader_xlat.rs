@@ -24,19 +24,25 @@ static ORIGIN: OnceLock<Mutex<HashMap<usize, (u64, Arc<Vec<u8>>)>>> = OnceLock::
 
 static ORIGIN_HASH: OnceLock<Mutex<HashMap<usize, u64>>> = OnceLock::new();
 
+/// A panicked translation must not take the process down on the next lookup.
+/// Every mutex in this module recovers from poison the same way.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub fn note_origin_hash(code: usize, hash: u64) {
-    ORIGIN_HASH.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner()).insert(code, hash);
+    lock(ORIGIN_HASH.get_or_init(|| Mutex::new(HashMap::new()))).insert(code, hash);
 }
 
 pub fn origin_hash(code: usize) -> Option<u64> {
-    if let Some(h) = ORIGIN_HASH.get().and_then(|m| m.lock().unwrap_or_else(|e| e.into_inner()).get(&code).copied()) {
+    if let Some(h) = ORIGIN_HASH.get().and_then(|m| lock(m).get(&code).copied()) {
         return Some(h);
     }
     origin(code).map(|(h, _)| h)
 }
 
 pub fn origin(code: usize) -> Option<(u64, Arc<Vec<u8>>)> {
-    ORIGIN.get()?.lock().unwrap().get(&code).cloned()
+    lock(ORIGIN.get()?).get(&code).cloned()
 }
 
 pub(crate) fn fnv1a(b: &[u8]) -> u64 {
@@ -308,7 +314,7 @@ pub unsafe fn translate(ptr: *const u8, len: usize) -> Cached {
 pub fn retranslate(blob: &Arc<Vec<u8>>, hash: u64, rtfmt: [u8; 8]) -> Result<Arc<Vec<u8>>, String> {
     let v = std::panic::catch_unwind(|| translate_uncached(blob, hash, &rtfmt)).unwrap_or_else(|_| Err("translator panicked".to_string()))?;
     let v = Arc::new(v);
-    ORIGIN.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().insert(v.as_ptr() as usize, (hash, blob.clone()));
+    lock(ORIGIN.get_or_init(|| Mutex::new(HashMap::new()))).insert(v.as_ptr() as usize, (hash, blob.clone()));
     Ok(v)
 }
 
@@ -436,12 +442,12 @@ fn produce(blob: &[u8], hash: u64, rtfmt: &[u8; 8], _key: u64) -> Result<Vec<u8>
 
 fn cell(key: u64) -> Arc<OnceLock<Cached>> {
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    cache.lock().unwrap().entry(key).or_insert_with(|| Arc::new(OnceLock::new())).clone()
+    lock(cache).entry(key).or_insert_with(|| Arc::new(OnceLock::new())).clone()
 }
 
 fn mesh_root_cell(hash: u64, root: &[u8]) -> Arc<OnceLock<Cached>> {
     let cache = MESH_ROOT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().unwrap();
+    let mut cache = lock(cache);
     let roots = cache.entry(hash).or_default();
     if let Some(entry) = roots.get(root) {
         return entry.clone();
@@ -465,7 +471,7 @@ fn finish_with(res: Result<Vec<u8>, String>, hash: u64, len: usize, origin_blob:
             let v = Arc::new(v);
             note_origin_hash(v.as_ptr() as usize, hash);
             if let Some(blob) = origin_blob.filter(|_| crate::rtcap::enabled() || crate::hot_reload::enabled()) {
-                ORIGIN.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap().insert(v.as_ptr() as usize, (hash, Arc::new(blob.to_vec())));
+                lock(ORIGIN.get_or_init(|| Mutex::new(HashMap::new()))).insert(v.as_ptr() as usize, (hash, Arc::new(blob.to_vec())));
             }
             Ok(v)
         }
@@ -531,7 +537,7 @@ pub fn start_prewarm() {
                 let t0 = std::time::Instant::now();
                 let mut done = 0usize;
                 loop {
-                    let next = q.lock().unwrap().pop();
+                    let next = lock(&q).pop();
                     let Some((p, h, rt)) = next else { break };
                     let Ok(blob) = std::fs::read(&p) else { continue };
                     if fnv1a(&blob) != h {
@@ -567,7 +573,7 @@ fn helper_pool() -> &'static Mutex<std::sync::mpsc::Sender<Job>> {
         for _ in 0..cores.saturating_sub(2).clamp(1, 8) {
             let rx = rx.clone();
             let _ = std::thread::Builder::new().name("tombox-shader-stage".into()).spawn(move || loop {
-                let job = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                let job = lock(&rx).recv();
                 match job {
                     Ok(j) => j(),
                     Err(_) => break,
@@ -593,7 +599,7 @@ pub unsafe fn prefetch(ptr: *const u8, len: usize, rtfmt: [u8; 8]) -> bool {
     let job: Job = Box::new(move || {
         c.get_or_init(|| crate::perf::timed(crate::perf::SHADER, || finish(produce(&blob, hash, &rtfmt, key), hash, blob.len(), &blob)));
     });
-    helper_pool().lock().unwrap_or_else(|e| e.into_inner()).send(job).is_ok()
+    lock(helper_pool()).send(job).is_ok()
 }
 
 pub unsafe fn translate_for_targets(ptr: *const u8, len: usize, rtfmt: [u8; 8]) -> Cached {
@@ -679,7 +685,7 @@ mod tests {
     #[test]
     fn mesh_root_translation_is_not_recorded_as_a_replayable_origin() {
         let out = finish_with(Ok(vec![5, 6, 7, 8]), 0x0bad_cafe_0000_0001, 4, None).unwrap();
-        assert!(ORIGIN.get().map_or(true, |m| !m.lock().unwrap().contains_key(&(out.as_ptr() as usize))));
+        assert!(ORIGIN.get().map_or(true, |m| !lock(m).contains_key(&(out.as_ptr() as usize))));
     }
 
     #[test]
@@ -701,7 +707,7 @@ mod tests {
         assert!(!unsafe { prefetch(known.as_ptr(), known.len(), [0; 8]) });
         let sent = std::sync::mpsc::channel::<u8>();
         let job: Job = Box::new(move || { let _ = sent.0.send(9); });
-        assert!(helper_pool().lock().unwrap().send(job).is_ok());
+        assert!(lock(helper_pool()).send(job).is_ok());
         assert_eq!(sent.1.recv_timeout(std::time::Duration::from_secs(5)), Ok(9));
     }
 
@@ -731,6 +737,18 @@ mod tests {
         assert_eq!(disable_loop_grad("#if defined(__SHADER_TARGET_MAJOR) && __SHADER_TARGET_MAJOR >= 6\n    #if defined(__SHADER_TARGET_MAJOR) && __SHADER_TARGET_MAJOR >= 6\nx"), "#if defined(__SHADER_TARGET_MAJOR) && __SHADER_TARGET_MAJOR >= 6\n    #if 0\nx");
         assert_eq!(cache_key(5, &[0; 8]), 5);
         assert_ne!(cache_key(5, &rt), 5);
+    }
+
+    #[test]
+    fn lock_returns_the_value_after_a_panic_poisons_the_mutex() {
+        let m = Mutex::new(7u32);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = m.lock().unwrap();
+            panic!("shader compile");
+        }));
+        assert!(panicked.is_err());
+        assert!(m.is_poisoned());
+        assert_eq!(*lock(&m), 7);
     }
 }
 

@@ -325,3 +325,29 @@ fn pixel_attribute_past_the_interpolants_reads_the_layer_sysval() {
     let t = translate(&ex).expect("v_interp_mov of the layer attribute translates");
     assert!(t.hlsl.contains("(uint)(i.i1.x)"), "{}", t.hlsl);
 }
+
+#[test]
+fn amplification_dispatch_uses_the_y_and_z_group_counts() {
+    let mut ex = shader(Stage::Amplification, &[S_ENDPGM], vec![], vec![], None);
+    ex.gs_info = Some(GsInfo {
+        input_primitive: 0,
+        output_topology: 0,
+        max_vertex_count: 0,
+        mesh: Some(MeshInfo {
+            stage: 14,
+            groupshared_bytes: 0,
+            payload_bytes: 16,
+            max_vertices: 0,
+            max_primitives: 0,
+            prim_vectors: 0,
+            topology: 0,
+            num_threads: [32, 1, 1],
+        }),
+    });
+    let t = translate(&ex).expect("amplification shader translates");
+    assert!(
+        t.hlsl.contains("DispatchMesh(tb_args[0], max(tb_args[1], 1u), max(tb_args[2], 1u), tb_pl);"),
+        "{}",
+        t.hlsl
+    );
+}

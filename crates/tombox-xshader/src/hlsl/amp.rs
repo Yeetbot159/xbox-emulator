@@ -266,7 +266,9 @@ impl<'a> Emitter<'a> {
         let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");
         h.push_str(&self.body);
         let _ = writeln!(h, "    GroupMemoryBarrierWithGroupSync();");
-        let _ = writeln!(h, "    DispatchMesh(tb_args[0], 1, 1, tb_pl);");
+        // The args ring is four dwords: X, Y, Z, flags. A shader that only writes X
+        // leaves Y and Z at the zero written above, and DispatchMesh rejects a zero count.
+        let _ = writeln!(h, "    DispatchMesh(tb_args[0], max(tb_args[1], 1u), max(tb_args[2], 1u), tb_pl);");
         h.push_str("}\n");
         Ok(h)
     }

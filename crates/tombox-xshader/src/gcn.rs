@@ -386,9 +386,13 @@ fn convert(ins: &Insn) -> Result<Vec<u32>, String> {
             ins.words.clone()
         }
         Enc::Mimg => {
+            // GFX7 has no dim field. DA only says the address includes an array index,
+            // so this is still a 2D / 2D-array guess. Bits 15..17 are R128, TFE and LWE
+            // on GFX7 and A16, D16 and a reserved bit on RDNA2, so they must not pass through.
             let da = (w >> 14) & 1;
             let dim = if da != 0 { 5 } else { 1 };
-            vec![(w & !(1 << 14)) | dim << 3, ins.words[1]]
+            let keep = !(1 << 14 | 1 << 15 | 1 << 16 | 1 << 17);
+            vec![(w & keep) | dim << 3, ins.words[1]]
         }
         Enc::Mtbuf => return Err(err("MTBUF (typed buffer) is not supported by the RDNA2 backend yet".into())),
         Enc::Flat => return Err(err("FLAT is not supported yet".into())),
@@ -810,6 +814,20 @@ mod tests {
         assert!(lower(&code, &[]).unwrap_err().contains("past the code section"));
         let code = bytes(&[0xbf840001, 0xbe802000, 0xbf810000]);
         assert!(lower(&code, &[]).unwrap_err().contains("computed address"));
+    }
+
+    #[test]
+    fn mimg_clears_gfx7_bits_that_rdna2_reads_as_a16_d16() {
+        // image_sample, dmask 0xf, DA=1, R128, TFE and LWE all set.
+        let op = 0x20u32;
+        let flags = (0xf << 8) | (1 << 14) | (1 << 15) | (1 << 16) | (1 << 17);
+        let w0 = (0b111100 << 26) | (op << 18) | flags;
+        let l = to_rdna2(&bytes(&[w0, 0, 0xbf810000])).unwrap();
+        let d = crate::rdna2::disassemble(&l.isa[..l.code_len]);
+        let img = d.iter().find(|i| i.enc == crate::rdna2::Enc::Mimg).expect("lowered image op");
+        assert_eq!(img.mnemonic, "image_sample");
+        assert_eq!(img.aux.imm, 5, "DA selects a 2D array");
+        assert_eq!(img.raw[0] & (1 << 14 | 1 << 15 | 1 << 16 | 1 << 17), 0, "{:#x}", img.raw[0]);
     }
 
     #[test]
