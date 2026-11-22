@@ -167,6 +167,11 @@ fn vop2_map(op: u32) -> Result<Vop2Map, String> {
         0x01 => Vop3(0x360),
         0x02 => Vop3(0x361),
         0x03..=0x0c | 0x0f..=0x14 | 0x16 | 0x18 | 0x1a..=0x1d | 0x1f..=0x21 | 0x28..=0x2a | 0x2f => Same(op),
+        // GFX7 v_min_legacy_f32 / v_max_legacy_f32 return the other input when one is NaN.
+        // RDNA2 v_min_f32 / v_max_f32 do the same (exec_vop: a NaN paired with 2.0 yields 2.0),
+        // and there is no separate legacy opcode on GFX10.
+        0x0d => Same(0x0f),
+        0x0e => Same(0x10),
         0x15 => Vop3Swap(0x116),
         0x17 => Vop3Swap(0x118),
         0x19 => Vop3Swap(0x11a),
@@ -182,8 +187,6 @@ fn vop2_map(op: u32) -> Result<Vop2Map, String> {
         0x2e => Vop3(0x369),
         0x30 => Vop3(0x36a),
         0x31 => Vop3(0x36b),
-        0x0d => return Err("v_min_legacy_f32 (gfx7 VOP2 0x0d) has no RDNA2 equivalent yet".into()),
-        0x0e => return Err("v_max_legacy_f32 (gfx7 VOP2 0x0e) has no RDNA2 equivalent yet".into()),
         0x2c => return Err("v_cvt_pkaccum_u8_f32 (gfx7 VOP2 0x2c) has no RDNA2 equivalent yet".into()),
         _ => return Err(format!("gfx7 VOP2 opcode {op:#x} is not defined")),
     })
@@ -701,6 +704,20 @@ mod tests {
         }
         v.sort();
         v
+    }
+
+    #[test]
+    fn legacy_float_min_max_lower_to_rdna2_min_max() {
+        let min = (0x0du32 << 25) | (1 << 17) | (2 << 9) | (256 + 3);
+        let max = (0x0eu32 << 25) | (4 << 17) | (5 << 9) | (256 + 6);
+        let l = to_rdna2(&bytes(&[min, max, 0xbf81_0000])).unwrap();
+        let d = crate::rdna2::disassemble(&l.isa[..l.code_len]);
+        assert_eq!(d[0].mnemonic, "v_min_f32");
+        assert_eq!(d[1].mnemonic, "v_max_f32");
+        assert_eq!((d[0].raw[0] >> 25) & 0x3f, 0x0f);
+        assert_eq!((d[1].raw[0] >> 25) & 0x3f, 0x10);
+        assert_eq!(d[0].raw[0] & !(0x3f << 25), min & !(0x3f << 25));
+        assert_eq!(d[1].raw[0] & !(0x3f << 25), max & !(0x3f << 25));
     }
 
     #[test]

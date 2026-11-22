@@ -246,7 +246,8 @@ impl<'a> Emitter<'a> {
             return Err(format!("amplification payload of {} bytes exceeds the D3D12 limit {MAX_PAYLOAD}", m.payload_bytes));
         }
         let [tx, ty, tz] = self.amp_threads(&m)?;
-        if tx * ty * tz > 128 {
+        let threads = (tx as u64).saturating_mul(ty as u64).saturating_mul(tz as u64);
+        if threads == 0 || threads > 128 {
             return Err(format!("amplification thread-group size {:?} above 128", m.num_threads));
         }
         let n = payload_dwords(m.payload_bytes.max(4));

@@ -37,11 +37,11 @@ impl<'a> Emitter<'a> {
 
     fn ms_threads(&self) -> Result<u32, String> {
         let m = self.mesh_info()?;
-        let n = m.num_threads.iter().map(|&x| x.max(1)).product::<u32>();
-        if m.num_threads[0] == 0 || n > 128 {
+        let n = m.num_threads.iter().map(|&x| x.max(1) as u64).fold(1u64, |a, b| a.saturating_mul(b));
+        if m.num_threads[0] == 0 || n == 0 || n > 128 {
             return Err(format!("mesh shader thread-group size {:?} outside 1..128", m.num_threads));
         }
-        Ok(n)
+        Ok(n as u32)
     }
 
     pub(super) fn mesh_mbcnt(&self, ins: &Insn, b: String) -> Result<String, String> {

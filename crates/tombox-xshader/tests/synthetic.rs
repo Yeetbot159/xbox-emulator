@@ -366,6 +366,36 @@ fn consecutive_lds() -> [u32; 7] {
     [0xd834_0000, 0x0000_0909, 0xd834_0000, 0x0000_0a09, 0xd8d8_0000, 0x0700_0007, S_ENDPGM]
 }
 
+fn wrapped_thread_group_is_refused(stage: Stage, info_stage: u8) {
+    let mut ex = shader(stage, &[S_ENDPGM], vec![], vec![], None);
+    ex.gs_info = Some(GsInfo {
+        input_primitive: 0,
+        output_topology: 0,
+        max_vertex_count: 0,
+        mesh: Some(MeshInfo {
+            stage: info_stage,
+            groupshared_bytes: 0,
+            payload_bytes: 16,
+            max_vertices: 1,
+            max_primitives: 1,
+            prim_vectors: 0,
+            topology: 2,
+            num_threads: [65536, 65536, 1],
+        }),
+    });
+    let err = match translate(&ex) {
+        Err(e) => e,
+        Ok(_) => panic!("a wrapped group size must be refused"),
+    };
+    assert!(err.contains("thread-group") && err.contains("128"), "{err}");
+}
+
+#[test]
+fn amplification_and_mesh_reject_a_thread_group_that_wraps_past_128() {
+    wrapped_thread_group_is_refused(Stage::Amplification, 14);
+    wrapped_thread_group_is_refused(Stage::Mesh, 13);
+}
+
 #[test]
 fn one_wave_compute_separates_consecutive_lds_writes() {
     let mark = "GroupMemoryBarrierWithGroupSync(); // wave_lds_sync";
